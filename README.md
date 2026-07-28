@@ -140,14 +140,14 @@ uv run viewer.py
 ```
 
 Optional, and only if you plan to use the **Render** button: installing LLVM lets mitsuba use its
-vectorised CPU backend instead of the scalar one.
+vectorised CPU backend instead of the scalar one, which is worth about 25% off render time.
 
 ```
 winget install LLVM.LLVM
 ```
 
 Nothing to configure after that, and nothing breaks without it. See
-[On GPUs and LLVM](#on-gpus-and-llvm) for why it is not bundled.
+[On GPUs and LLVM](#on-gpus-and-llvm) for why it is not bundled and why the gain is not larger.
 
 That opens the live parameter viewer: drag sliders, watch the assembly rebuild. The board mesh is
 cached on the parameters that affect it, so pillar-only tweaks stay interactive even at 250 x 250 mm.
@@ -182,8 +182,11 @@ elapsed time, and **Cancel render** stops it between passes. Touching the view c
 The **Samples** slider trades time for noise, and **Denoise** runs
 [Open Image Denoise](https://www.openimagedenoise.org/) over the result once the last pass lands.
 The denoiser costs about half a second and is worth roughly an 8x sample budget, which is why the
-default is only 64 samples: on a 16-core CPU that is about 10 seconds for the image above. Turn
-Denoise off and you need ~512 samples for comparable cleanliness, which takes minutes.
+default is only 64 samples. Turn Denoise off and you need ~512 samples for comparable cleanliness,
+which takes minutes.
+
+At 64 samples and 1280x960, the image above takes about **7 s** with LLVM installed and **9 s**
+without, on a 16-core CPU.
 
 ### On GPUs and LLVM
 
@@ -193,12 +196,23 @@ Short version: on this machine, no. Longer version, since it is not obvious:
   Intel GPU backend at all, so an integrated Radeon or Arc cannot be used, and the OptiX denoiser is
   NVIDIA-only for the same reason. The CPU denoiser above is the substitute, and it is a bigger win
   than the GPU would have been for a render this small.
-- **LLVM.** mitsuba's `llvm_ad_rgb` variant vectorises across SIMD lanes and is the fast CPU path,
-  but Dr.Jit loads LLVM at runtime instead of bundling it, and on Windows finds it only via
-  `DRJIT_LIBLLVM_PATH` or the DLL search path. Without it you silently get `scalar_rgb`, which is
-  what the `jitc_llvm_init()` warning on startup is telling you. Note that this is not the same LLVM
-  that numba uses: llvmlite links LLVM statically into its own DLL and does not expose the C API
-  Dr.Jit needs, so having numba working is no help here.
+- **LLVM.** mitsuba's `llvm_ad_rgb` variant vectorises across SIMD lanes, and Dr.Jit loads LLVM at
+  runtime instead of bundling it, finding it on Windows only via `DRJIT_LIBLLVM_PATH` or the DLL
+  search path. Without it you silently get `scalar_rgb`, which is what the `jitc_llvm_init()`
+  warning on startup is telling you. Note that this is not the same LLVM that numba uses: llvmlite
+  links LLVM statically into its own DLL and does not expose the C API Dr.Jit needs, so having numba
+  working is no help here.
+
+  **Temper your expectations**: measured on this scene, LLVM is worth about 25% end to end (7.0 s
+  against 9.2 s at 64 samples), not the multiple you might expect from "vectorised". Path tracing
+  is branch-heavy and incoherent, which is close to the worst case for SIMD. Two things also had to
+  be fixed before it was worth anything at all, both of which cost more than LLVM gained:
+
+  - The JIT variants pay a fixed cost per kernel launch, so splitting the sample budget into eight
+    passes for progress reporting cost a full second and made LLVM *slower* than scalar. Passes are
+    now sized to a 16-sample floor, which puts the overhead back in the noise.
+  - `max_depth` was 8. With no glass or metal in the scene, light has nothing left to do after a few
+    diffuse bounces, and 5 renders 23% faster for a 0.02% difference in mean radiance.
 
 To get the faster variant, install LLVM:
 

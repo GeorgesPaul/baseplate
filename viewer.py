@@ -148,7 +148,6 @@ def mesh_arrays(manifold):
 
 
 RENDER_OVERLAY = "pretty render"
-RENDER_PASSES = 8   # chunks the sample budget is split into, for progress
 
 # active: an overlay image is up. cam: the camera it was rendered from, so a
 # nudge of the view can invalidate it. armed: the button press that started
@@ -207,7 +206,7 @@ def _render_worker(surfaces, cam, aspect, width, spp):
     """Accumulate `spp` samples in chunks, publishing after each one."""
     try:
         scene, _ = rpt.make_scene(surfaces, cam, aspect, width)
-        chunk_spp = max(4, spp // RENDER_PASSES)
+        chunk_spp, _ = rpt.pass_plan(spp)
         weighted = None
         done = 0
         index = 0

@@ -30,8 +30,32 @@ GROUND_GREY = (0.780, 0.780, 0.800)
 ROUGHNESS = {"plate": 0.18, "pillar": 0.42}  # plates have solder-mask sheen, prints are matte
 
 MAX_WIDTH = 1600      # render resolution cap; the overlay is stretched to the viewport
-DEFAULT_SPP = 64      # with the denoiser on, this is already clean; ~10 s at the cap
+DEFAULT_SPP = 64      # with the denoiser on, this is already clean
 MIN_SPP, MAX_SPP = 8, 512
+
+# Path length. Measured on the 70x70 assembly at 64 spp: max_depth 8 took
+# 8.57 s, max_depth 5 took 6.57 s, and the two images differ by 0.02% in mean
+# radiance, which is nothing. There is no glass or metal in this scene, so
+# light has nothing to do after a few diffuse bounces and paying for eight is
+# pure waste. Below 5 it does start to show: depth 3 loses 0.8% of the energy
+# and depth 2 loses 6.7%, visibly flattening the shadowed slots.
+MAX_DEPTH = 5
+RR_DEPTH = 3
+
+# Per-pass launch overhead, so that progress reporting does not cost real
+# time. Also measured: at 64 spp, 1/2/4 passes all land within 0.15 s of each
+# other, but 8 passes costs a full second. The JIT variants pay a fixed cost
+# per kernel launch, so passes have to be big enough to be worth starting.
+MIN_PASS_SPP = 16
+MAX_PASSES = 8
+
+
+def pass_plan(spp):
+    """(chunk_spp, n_passes) for a sample budget: as many progress updates as
+    can be had without the launch overhead becoming measurable."""
+    chunk = max(MIN_PASS_SPP, -(-spp // MAX_PASSES))
+    chunk = min(chunk, spp)
+    return chunk, -(-spp // chunk)
 
 
 def _hint_llvm():
@@ -114,7 +138,7 @@ def _scene_dict(mi, parts, cam, width, height, lo, hi):
 
     scene = {
         "type": "scene",
-        "integrator": {"type": "path", "max_depth": 8},
+        "integrator": {"type": "path", "max_depth": MAX_DEPTH, "rr_depth": RR_DEPTH},
         "sensor": {
             "type": "perspective",
             "fov": float(fov_vertical_deg),
