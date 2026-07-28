@@ -53,6 +53,13 @@ what the corner stubs are actually doing. Here the clip fixture's cross-drilled 
 
 ![70x70 assembly with the top plate hidden](images/assembly_70x70_open.png)
 
+### Top plate see-through
+
+The top plate also has an opacity slider, for when you want the lid in place but still need to see
+what is underneath it. Here it is at 40%.
+
+![70x70 assembly with a semi-transparent top plate](images/assembly_70x70_transparent_top.png)
+
 ### Snap lines off
 
 The break-off slots are a checkbox. Turn them off for a plain drilled grid plate: nothing to snap
@@ -137,7 +144,29 @@ cached on the parameters that affect it, so pillar-only tweaks stay interactive 
 
 The **Show** row has an independent checkbox for the pillars, the bottom plate and the top plate.
 Anything unchecked is not built at all, not just hidden, so hiding the plates also makes rebuilds
-faster while you tune pillar geometry.
+faster while you tune pillar geometry. The top plate additionally has an opacity slider.
+
+mitsuba is only imported when you press **Render**, so it costs nothing on a session that never
+uses it.
+
+### The Render button
+
+The live view is a rasterizer. It is fast and fine for working, but the board is mostly holes and
+slots, and those only really read as depth once something traces shadow rays into them. The
+**Render** button path-traces the current view with [mitsuba 3](https://www.mitsuba-renderer.org/)
+and paints the result over the viewport; click or move the view and it disappears.
+
+| Live view | Render button |
+|---|---|
+| ![rasterized viewport](images/assembly_70x70_clip_h35.png) | ![path-traced render](images/render_raytraced.png) |
+
+It respects everything the live view is showing, including top plate opacity:
+
+![path-traced render with a semi-transparent top plate](images/render_raytraced_transparent.png)
+
+The **Samples** slider next to the button trades time for noise. The default of 192 lands around
+half a minute at the 1600 px render cap on a 16-core machine; drop it to 32 for a quick look, push
+it to 512 if you want a clean image to keep. Rendering blocks the viewer while it runs.
 
 Two buttons in the viewer export:
 
@@ -189,6 +218,7 @@ The board is first written in a conservative s-expression format, then reloaded 
 
 ```
 viewer.py                     live parameter viewer (polyscope + imgui)
+render.py                     offline path-traced render for the Render button (mitsuba 3)
 pillars/pillar.py             parametric L-pillar generator (manifold3d), STL export
 PCB/baseplate_geometry.py     hole/slot pattern, single source of truth
 PCB/baseplate_mesh.py         manifold3d board model for the viewer

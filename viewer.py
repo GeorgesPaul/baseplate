@@ -23,6 +23,7 @@ import time
 import numpy as np
 import polyscope as ps
 import polyscope.imgui as psim
+import polyscope_bindings as psb
 from manifold3d import Manifold, OpType
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +31,7 @@ sys.path.insert(0, os.path.join(ROOT, "pillars"))
 sys.path.insert(0, os.path.join(ROOT, "PCB"))
 import pillar as pl
 import baseplate_mesh as bpm
+import render as rpt
 from baseplate_geometry import CELL, WEB, EDGE_WEB, solid_fraction
 
 EDGE_MARGIN = CELL / 2.0  # mm, corner M3 hole center to board edge (fixed by the grid)
@@ -49,7 +51,8 @@ params["snap_lines"] = True
 params["web"] = WEB
 params["edge_web"] = EDGE_WEB
 
-view = dict(show_plate_bottom=True, show_plate_top=True, show_pillars=True)
+view = dict(show_plate_bottom=True, show_plate_top=True, show_pillars=True,
+            top_transparency=1.0, render_spp=rpt.DEFAULT_SPP)
 
 FIXTURES = ("clip", "snap", "screw", "press")
 
@@ -90,6 +93,13 @@ def setup_render(ssaa=SSAA_INTERACTIVE):
     ps.set_shadow_blur_iters(4)
     ps.set_background_color((1.0, 1.0, 1.0))
     ps.set_SSAA_factor(ssaa)
+    # Needed for the top plate's transparency slider to composite correctly
+    # instead of falling back to a screen-door approximation.
+    ps.set_transparency_mode("pretty")
+
+
+def mesh_transparency(name):
+    return view["top_transparency"] if name == "plate_top" else 1.0
 
 
 def rot90(pt, k):
@@ -136,12 +146,97 @@ def mesh_arrays(manifold):
     return np.asarray(m.vert_properties)[:, :3], np.asarray(m.tri_verts)
 
 
-def rebuild():
-    """Rebuilds whatever is out of date. get_board() is itself cached on the
-    params that affect it, so calling it here is cheap when only a
-    pillar-only parameter changed."""
-    global last_build_ms, mesh_names, scene_lo, scene_hi
+RENDER_OVERLAY = "pretty render"
+
+# active: an overlay image is up. cam: the camera it was rendered from, so a
+# nudge of the view can invalidate it. armed: the button press that started
+# the render must not immediately dismiss its own result, so the overlay only
+# starts listening for dismissal once all mouse buttons have come back up.
+render_state = {"active": False, "cam": None, "armed": False}
+
+
+def camera_signature():
+    c = ps.get_view_camera_parameters()
+    return (tuple(np.round(c.get_position(), 5)),
+            tuple(np.round(c.get_look_dir(), 5)),
+            tuple(np.round(c.get_up_dir(), 5)),
+            round(float(c.get_fov_vertical_deg()), 4))
+
+
+def clear_render_overlay():
+    if render_state["active"]:
+        # No module-level remover for floating quantities in polyscope 2.6;
+        # the binding is the supported way to drop one by name.
+        psb.remove_floating_quantity(RENDER_OVERLAY, False)  # False: don't error if absent
+        render_state.update(active=False, cam=None, armed=False)
+
+
+def poll_render_overlay():
+    """Dismiss the render as soon as the user touches the view.
+
+    Polyscope only runs this callback on frames it actually redraws, and it
+    skips redraws when nothing has changed. So while an overlay is up we ask
+    for the next frame unconditionally, to keep the poll live rather than
+    relying on something else to request a redraw first."""
+    if not render_state["active"]:
+        return
+    io = psim.GetIO()
+    mouse_down = any(psim.IsMouseDown(b) for b in (0, 1, 2))
+    if not render_state["armed"]:
+        if not mouse_down:
+            render_state["armed"] = True
+        ps.request_redraw()
+        return
+    if (camera_signature() != render_state["cam"]
+            or io.MouseWheel != 0.0
+            or (mouse_down and not io.WantCaptureMouse)):
+        clear_render_overlay()
+    else:
+        ps.request_redraw()
+
+
+def render_pretty():
+    """Path-trace the current view and paint it over the viewport. Blocks:
+    the whole point is one good frame, and backgrounding it would mean
+    keeping a second copy of the scene alive to render against."""
+    global status_line
+    clear_render_overlay()
+
+    meshes = scene_meshes()
+    if not meshes:
+        status_line = "Nothing visible to render"
+        return
+
+    surfaces = []
+    for name, (verts, tris) in meshes.items():
+        color = rpt.PILLAR_BLUE if name == "pillar" else rpt.FR4_GREEN
+        roughness = rpt.ROUGHNESS["pillar" if name == "pillar" else "plate"]
+        surfaces.append((name, verts, tris, color, roughness, mesh_transparency(name)))
+
+    c = ps.get_view_camera_parameters()
+    cam = (np.asarray(c.get_position(), dtype=float),
+           np.asarray(c.get_look_dir(), dtype=float),
+           np.asarray(c.get_up_dir(), dtype=float),
+           float(c.get_fov_vertical_deg()))
+
+    spp = int(view["render_spp"])
+    print("Rendering at %d spp, this blocks the viewer..." % spp)
     t0 = time.perf_counter()
+    image = rpt.render_view(surfaces, cam, float(c.get_aspect()),
+                            ps.get_window_size()[0], spp=spp)
+    dt = time.perf_counter() - t0
+
+    ps.add_color_image_quantity(RENDER_OVERLAY, image, image_origin="upper_left",
+                                enabled=True, show_fullscreen=True)
+    render_state.update(active=True, cam=camera_signature(), armed=False)
+    status_line = "Rendered %d spp in %.0f s (click or move the view to dismiss)" % (spp, dt)
+    print(status_line)
+
+
+def scene_meshes():
+    """The currently visible meshes as name -> (verts, tris). Shared by the
+    live view and the offline render so the two cannot show different
+    things."""
     p = pillar_params()
     board, geo = get_board()
 
@@ -152,11 +247,23 @@ def rebuild():
         meshes["plate_bottom"] = mesh_arrays(board.translate((0, 0, -p["plate_t"])))
     if view["show_plate_top"]:
         meshes["plate_top"] = mesh_arrays(board.translate((0, 0, p["height"])))
+    return meshes
+
+
+def rebuild():
+    """Rebuilds whatever is out of date. get_board() is itself cached on the
+    params that affect it, so calling it here is cheap when only a
+    pillar-only parameter changed."""
+    global last_build_ms, mesh_names, scene_lo, scene_hi
+    t0 = time.perf_counter()
+    clear_render_overlay()
+    meshes = scene_meshes()
 
     new_names = []
     for name, (verts, tris) in meshes.items():
         ps.register_surface_mesh(name, verts, tris, smooth_shade=False,
-                                 color=MESH_COLORS.get(name), material=MATERIAL)
+                                 color=MESH_COLORS.get(name), material=MATERIAL,
+                                 transparency=mesh_transparency(name))
         new_names.append(name)
 
     for name in mesh_names:
@@ -247,6 +354,8 @@ def ui():
     board_dirty = False
     pillars_dirty = False
 
+    poll_render_overlay()
+
     psim.TextUnformatted("Rebuild time: %.0f ms" % last_build_ms)
     _, geo = get_board()
     if abs(geo.width - params["pcb_length"]) > 1e-6 or abs(geo.height - params["pcb_width"]) > 1e-6:
@@ -298,6 +407,16 @@ def ui():
     psim.SameLine()
     changed, view["show_plate_top"] = psim.Checkbox("Top plate", view["show_plate_top"])
     board_dirty = board_dirty or changed
+
+    if view["show_plate_top"]:
+        changed, view["top_transparency"] = psim.SliderFloat(
+            "Top plate opacity", view["top_transparency"], 0.05, 1.0)
+        if changed:
+            # Opacity is a display property, not geometry, so poke the
+            # registered mesh directly rather than paying for a rebuild.
+            clear_render_overlay()
+            if ps.has_surface_mesh("plate_top"):
+                ps.get_surface_mesh("plate_top").set_transparency(view["top_transparency"])
 
     if psim.TreeNodeEx("Pillar parameters", psim.ImGuiTreeNodeFlags_DefaultOpen):
         for label, key, mn, mx in (
@@ -355,6 +474,13 @@ def ui():
                 params[key] = pl.DEFAULTS[key]
             pillars_dirty = True
         psim.TreePop()
+
+    psim.Separator()
+    if psim.Button("Render"):
+        render_pretty()
+    psim.SameLine()
+    _, view["render_spp"] = psim.SliderInt("Samples", int(view["render_spp"]),
+                                           rpt.MIN_SPP, rpt.MAX_SPP)
 
     psim.Separator()
     if psim.Button("Export STL"):
