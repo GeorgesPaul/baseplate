@@ -18,6 +18,7 @@ import glob
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import numpy as np
@@ -52,7 +53,7 @@ params["web"] = WEB
 params["edge_web"] = EDGE_WEB
 
 view = dict(show_plate_bottom=True, show_plate_top=True, show_pillars=True,
-            top_transparency=1.0, render_spp=rpt.DEFAULT_SPP)
+            top_transparency=1.0, render_spp=rpt.DEFAULT_SPP, render_denoise=True)
 
 FIXTURES = ("clip", "snap", "screw", "press")
 
@@ -147,12 +148,30 @@ def mesh_arrays(manifold):
 
 
 RENDER_OVERLAY = "pretty render"
+RENDER_PASSES = 8   # chunks the sample budget is split into, for progress
 
 # active: an overlay image is up. cam: the camera it was rendered from, so a
 # nudge of the view can invalidate it. armed: the button press that started
 # the render must not immediately dismiss its own result, so the overlay only
 # starts listening for dismissal once all mouse buttons have come back up.
 render_state = {"active": False, "cam": None, "armed": False}
+
+# The render runs on a worker thread. mitsuba releases the GIL while it
+# traces, so the viewer keeps drawing and can show progress and a preview
+# that refines pass by pass, instead of freezing with no feedback.
+render_job = {
+    "thread": None,
+    "lock": threading.Lock(),
+    "running": False,
+    "cancel": False,
+    "done_spp": 0,
+    "total_spp": 0,
+    "linear": None,      # accumulated linear image, written by the worker
+    "version": 0,        # bumped per pass so the UI knows a new one is ready
+    "shown_version": -1,
+    "error": None,
+    "t0": 0.0,
+}
 
 
 def camera_signature():
@@ -163,7 +182,20 @@ def camera_signature():
             round(float(c.get_fov_vertical_deg()), 4))
 
 
+def cancel_render():
+    """Ask the worker to stop. It checks between passes, so this returns
+    immediately and the thread winds up within one pass."""
+    if render_job["running"]:
+        render_job["cancel"] = True
+
+
 def clear_render_overlay():
+    """Drop the overlay and abandon any render still feeding it. The
+    shown_version bump matters: the worker can publish one more pass before
+    it notices the cancel flag, and without this that straggler would put
+    the overlay straight back up."""
+    cancel_render()
+    render_job["shown_version"] = render_job["version"]
     if render_state["active"]:
         # No module-level remover for floating quantities in polyscope 2.6;
         # the binding is the supported way to drop one by name.
@@ -171,35 +203,36 @@ def clear_render_overlay():
         render_state.update(active=False, cam=None, armed=False)
 
 
-def poll_render_overlay():
-    """Dismiss the render as soon as the user touches the view.
+def _render_worker(surfaces, cam, aspect, width, spp):
+    """Accumulate `spp` samples in chunks, publishing after each one."""
+    try:
+        scene, _ = rpt.make_scene(surfaces, cam, aspect, width)
+        chunk_spp = max(4, spp // RENDER_PASSES)
+        weighted = None
+        done = 0
+        index = 0
+        while done < spp and not render_job["cancel"]:
+            chunk = min(chunk_spp, spp - done)
+            # Distinct seeds keep the passes independent, so their mean is
+            # the same estimator as one render of the combined sample count.
+            passed = rpt.render_pass(scene, chunk, seed=index) * chunk
+            weighted = passed if weighted is None else weighted + passed
+            done += chunk
+            index += 1
+            with render_job["lock"]:
+                render_job["linear"] = weighted / done
+                render_job["done_spp"] = done
+                render_job["version"] += 1
+    except Exception as exc:                      # noqa: BLE001 - surfaced in the UI
+        render_job["error"] = exc
+    finally:
+        render_job["running"] = False
 
-    Polyscope only runs this callback on frames it actually redraws, and it
-    skips redraws when nothing has changed. So while an overlay is up we ask
-    for the next frame unconditionally, to keep the poll live rather than
-    relying on something else to request a redraw first."""
-    if not render_state["active"]:
-        return
-    io = psim.GetIO()
-    mouse_down = any(psim.IsMouseDown(b) for b in (0, 1, 2))
-    if not render_state["armed"]:
-        if not mouse_down:
-            render_state["armed"] = True
-        ps.request_redraw()
-        return
-    if (camera_signature() != render_state["cam"]
-            or io.MouseWheel != 0.0
-            or (mouse_down and not io.WantCaptureMouse)):
-        clear_render_overlay()
-    else:
-        ps.request_redraw()
 
-
-def render_pretty():
-    """Path-trace the current view and paint it over the viewport. Blocks:
-    the whole point is one good frame, and backgrounding it would mean
-    keeping a second copy of the scene alive to render against."""
+def start_render():
     global status_line
+    if render_job["running"]:
+        return
     clear_render_overlay()
 
     meshes = scene_meshes()
@@ -218,19 +251,90 @@ def render_pretty():
            np.asarray(c.get_look_dir(), dtype=float),
            np.asarray(c.get_up_dir(), dtype=float),
            float(c.get_fov_vertical_deg()))
-
     spp = int(view["render_spp"])
-    print("Rendering at %d spp, this blocks the viewer..." % spp)
-    t0 = time.perf_counter()
-    image = rpt.render_view(surfaces, cam, float(c.get_aspect()),
-                            ps.get_window_size()[0], spp=spp)
-    dt = time.perf_counter() - t0
 
-    ps.add_color_image_quantity(RENDER_OVERLAY, image, image_origin="upper_left",
-                                enabled=True, show_fullscreen=True)
-    render_state.update(active=True, cam=camera_signature(), armed=False)
-    status_line = "Rendered %d spp in %.0f s (click or move the view to dismiss)" % (spp, dt)
-    print(status_line)
+    render_job.update(running=True, cancel=False, done_spp=0, total_spp=spp,
+                      linear=None, version=0, shown_version=-1, error=None,
+                      t0=time.perf_counter())
+    render_state.update(active=False, cam=camera_signature(), armed=False)
+    render_job["thread"] = threading.Thread(
+        target=_render_worker, daemon=True,
+        args=(surfaces, cam, float(c.get_aspect()), ps.get_window_size()[0], spp))
+    render_job["thread"].start()
+    status_line = "Rendering..."
+
+
+def poll_render_job():
+    """Pick up whatever the worker has produced and show it."""
+    global status_line
+    if render_job["error"] is not None:
+        error = render_job["error"]
+        render_job["error"] = None
+        status_line = "Render failed: %s" % error
+        print(status_line)
+        return
+
+    if render_job["cancel"]:
+        return
+    running = render_job["running"]
+    if not running and render_job["version"] == render_job["shown_version"]:
+        return
+
+    with render_job["lock"]:
+        linear = render_job["linear"]
+        version = render_job["version"]
+        done = render_job["done_spp"]
+
+    if linear is None:
+        status_line = "Rendering: preparing scene..."
+        ps.request_redraw()
+        return
+
+    if version != render_job["shown_version"]:
+        finished = not running
+        # Denoising costs about half a second, so it is worth it once at the
+        # end but not on every intermediate preview.
+        image = rpt.denoise(linear) if (finished and view["render_denoise"]) else linear
+        ps.add_color_image_quantity(RENDER_OVERLAY, rpt.to_srgb(image),
+                                    image_origin="upper_left", enabled=True,
+                                    show_fullscreen=True)
+        render_job["shown_version"] = version
+        render_state["active"] = True
+
+    elapsed = time.perf_counter() - render_job["t0"]
+    if running:
+        status_line = "Rendering %d/%d samples, %.0f s" % (done, render_job["total_spp"], elapsed)
+        ps.request_redraw()
+    else:
+        status_line = ("Rendered %d samples in %.0f s (click or move the view to dismiss)"
+                       % (done, elapsed))
+        print(status_line)
+
+
+def poll_render_overlay():
+    """Dismiss the render, and cancel one in flight, as soon as the user
+    touches the view.
+
+    Polyscope only runs this callback on frames it actually redraws, and it
+    skips redraws when nothing has changed. So while an overlay is up we ask
+    for the next frame unconditionally, to keep the poll live rather than
+    relying on something else to request a redraw first."""
+    if not render_state["active"] and not render_job["running"]:
+        return
+    io = psim.GetIO()
+    mouse_down = any(psim.IsMouseDown(b) for b in (0, 1, 2))
+    if not render_state["armed"]:
+        if not mouse_down:
+            render_state["armed"] = True
+        ps.request_redraw()
+        return
+    if (camera_signature() != render_state["cam"]
+            or io.MouseWheel != 0.0
+            or (mouse_down and not io.WantCaptureMouse)):
+        cancel_render()
+        clear_render_overlay()
+    else:
+        ps.request_redraw()
 
 
 def scene_meshes():
@@ -355,6 +459,7 @@ def ui():
     pillars_dirty = False
 
     poll_render_overlay()
+    poll_render_job()
 
     psim.TextUnformatted("Rebuild time: %.0f ms" % last_build_ms)
     _, geo = get_board()
@@ -476,11 +581,22 @@ def ui():
         psim.TreePop()
 
     psim.Separator()
-    if psim.Button("Render"):
-        render_pretty()
-    psim.SameLine()
-    _, view["render_spp"] = psim.SliderInt("Samples", int(view["render_spp"]),
-                                           rpt.MIN_SPP, rpt.MAX_SPP)
+    if render_job["running"]:
+        if psim.Button("Cancel render"):
+            cancel_render()
+            clear_render_overlay()
+        psim.SameLine()
+        done, total = render_job["done_spp"], max(1, render_job["total_spp"])
+        psim.ProgressBar(done / total, (-1.0, 0.0),
+                         "%d/%d samples  %.0f s" % (done, total,
+                                                    time.perf_counter() - render_job["t0"]))
+    else:
+        if psim.Button("Render"):
+            start_render()
+        psim.SameLine()
+        _, view["render_spp"] = psim.SliderInt("Samples", int(view["render_spp"]),
+                                               rpt.MIN_SPP, rpt.MAX_SPP)
+        _, view["render_denoise"] = psim.Checkbox("Denoise", view["render_denoise"])
 
     psim.Separator()
     if psim.Button("Export STL"):

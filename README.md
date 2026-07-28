@@ -146,8 +146,8 @@ The **Show** row has an independent checkbox for the pillars, the bottom plate a
 Anything unchecked is not built at all, not just hidden, so hiding the plates also makes rebuilds
 faster while you tune pillar geometry. The top plate additionally has an opacity slider.
 
-mitsuba is only imported when you press **Render**, so it costs nothing on a session that never
-uses it.
+mitsuba and the denoiser are only imported when you press **Render**, so they cost nothing on a
+session that never uses them.
 
 ### The Render button
 
@@ -164,9 +164,36 @@ It respects everything the live view is showing, including top plate opacity:
 
 ![path-traced render with a semi-transparent top plate](images/render_raytraced_transparent.png)
 
-The **Samples** slider next to the button trades time for noise. The default of 192 lands around
-half a minute at the 1600 px render cap on a 16-core machine; drop it to 32 for a quick look, push
-it to 512 if you want a clean image to keep. Rendering blocks the viewer while it runs.
+Rendering runs on a worker thread. mitsuba releases the GIL while it traces, so the viewer keeps
+drawing: the sample budget is split into eight passes and each one is painted as it lands, so you
+watch the image resolve rather than watching a frozen window. A progress bar shows samples and
+elapsed time, and **Cancel render** stops it between passes. Touching the view cancels it too.
+
+The **Samples** slider trades time for noise, and **Denoise** runs
+[Open Image Denoise](https://www.openimagedenoise.org/) over the result once the last pass lands.
+The denoiser costs about half a second and is worth roughly an 8x sample budget, which is why the
+default is only 64 samples: on a 16-core CPU that is about 10 seconds for the image above. Turn
+Denoise off and you need ~512 samples for comparable cleanliness, which takes minutes.
+
+### On GPUs and LLVM
+
+Short version: on this machine, no. Longer version, since it is not obvious:
+
+- **GPU.** mitsuba's GPU backend is CUDA/OptiX, so it needs an NVIDIA card. Dr.Jit has no AMD or
+  Intel GPU backend at all, so an integrated Radeon or Arc cannot be used, and the OptiX denoiser is
+  NVIDIA-only for the same reason. The CPU denoiser above is the substitute, and it is a bigger win
+  than the GPU would have been for a render this small.
+- **LLVM.** mitsuba's `llvm_ad_rgb` variant vectorises across SIMD lanes and is the fast CPU path,
+  but Dr.Jit loads LLVM at runtime instead of bundling it, and on Windows finds it only via
+  `DRJIT_LIBLLVM_PATH` or the DLL search path. Without it you silently get `scalar_rgb`, which is
+  what the `jitc_llvm_init()` warning on startup is telling you. Note that this is not the same LLVM
+  that numba uses: llvmlite links LLVM statically into its own DLL and does not expose the C API
+  Dr.Jit needs, so having numba working is no help here.
+
+  Installing LLVM (`winget install LLVM.LLVM`, or the official Windows installer) puts `LLVM-C.dll`
+  in `C:\Program Files\LLVM\bin`. `render.py` looks there on import and sets `DRJIT_LIBLLVM_PATH`
+  itself, so the faster variant is picked up with no further configuration. Scalar still renders
+  image tiles across every core, so this is a speedup rather than a fix for something broken.
 
 Two buttons in the viewer export:
 
@@ -218,7 +245,7 @@ The board is first written in a conservative s-expression format, then reloaded 
 
 ```
 viewer.py                     live parameter viewer (polyscope + imgui)
-render.py                     offline path-traced render for the Render button (mitsuba 3)
+render.py                     path-traced render for the Render button (mitsuba 3 + OIDN)
 pillars/pillar.py             parametric L-pillar generator (manifold3d), STL export
 PCB/baseplate_geometry.py     hole/slot pattern, single source of truth
 PCB/baseplate_mesh.py         manifold3d board model for the viewer

@@ -30,8 +30,37 @@ GROUND_GREY = (0.780, 0.780, 0.800)
 ROUGHNESS = {"plate": 0.18, "pillar": 0.42}  # plates have solder-mask sheen, prints are matte
 
 MAX_WIDTH = 1600      # render resolution cap; the overlay is stretched to the viewport
-DEFAULT_SPP = 192     # ~35 s at the resolution cap on 16 cores; noise-free enough
-MIN_SPP, MAX_SPP = 16, 512
+DEFAULT_SPP = 64      # with the denoiser on, this is already clean; ~10 s at the cap
+MIN_SPP, MAX_SPP = 8, 512
+
+
+def _hint_llvm():
+    """Point Dr.Jit at an LLVM runtime if one is installed.
+
+    The LLVM variants are the fast CPU path, but Dr.Jit dlopen's LLVM at
+    runtime rather than bundling it, and on Windows it only finds the DLL
+    via DRJIT_LIBLLVM_PATH or the normal search path. A stock machine has
+    neither, which is why mitsuba silently drops to the scalar variant. If
+    LLVM is installed in the usual place, hand Dr.Jit the path so the fast
+    variant becomes available with no action from the user.
+
+    Must run before mitsuba is imported, hence the call at module import.
+    """
+    if os.environ.get("DRJIT_LIBLLVM_PATH"):
+        return
+    candidates = []
+    for env in ("ProgramFiles", "ProgramW6432", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            candidates.append(os.path.join(base, "LLVM", "bin", "LLVM-C.dll"))
+    candidates += ["/usr/lib/libLLVM.so", "/usr/local/lib/libLLVM.dylib"]
+    for path in candidates:
+        if os.path.exists(path):
+            os.environ["DRJIT_LIBLLVM_PATH"] = path
+            return
+
+
+_hint_llvm()
 
 
 def _write_ply(path, verts, tris):
@@ -76,7 +105,7 @@ def _bsdf(color, roughness, transparency):
     }
 
 
-def _scene_dict(mi, parts, cam, width, height, spp, lo, hi):
+def _scene_dict(mi, parts, cam, width, height, lo, hi):
     T = mi.ScalarTransform4f
 
     center = (lo + hi) / 2.0
@@ -91,7 +120,7 @@ def _scene_dict(mi, parts, cam, width, height, spp, lo, hi):
             "fov": float(fov_vertical_deg),
             "fov_axis": "y",
             "to_world": T().look_at(origin=list(eye), target=list(eye + look), up=list(up)),
-            "sampler": {"type": "independent", "sample_count": int(spp)},
+            "sampler": {"type": "independent", "sample_count": 16},  # overridden per pass
             "film": {
                 "type": "hdrfilm",
                 "width": int(width),
@@ -133,26 +162,44 @@ def _scene_dict(mi, parts, cam, width, height, spp, lo, hi):
     return scene
 
 
-def render_view(meshes, cam, aspect, window_width, spp=DEFAULT_SPP):
-    """Path-trace `meshes` from `cam` and return an (H, W, 3) float array in
-    [0, 1], sRGB encoded and ready to hand to polyscope as an image.
+def select_variant():
+    """Pick the fastest mitsuba variant this machine can actually run.
 
-    meshes: sequence of (name, verts, tris, color, roughness, transparency).
-    cam:    (eye, look_dir, up, fov_vertical_deg), all numpy arrays but fov.
+    The LLVM variants vectorise across SIMD lanes and are the fast CPU path,
+    but Dr.Jit loads LLVM at runtime from a shared library that is not part
+    of the wheel. If it is missing we fall back to scalar, which is slower
+    per sample but still renders image tiles across every core, so this is
+    not a fall back to single-threaded.
+
+    cuda_ad_rgb is deliberately not tried: it is NVIDIA-only, and Dr.Jit has
+    no AMD or Intel GPU backend, so on anything else the probe just costs
+    startup time.
     """
     import mitsuba as mi
 
-    # Only the scalar variant is guaranteed present; the LLVM ones need an
-    # LLVM shared library that many machines do not have. Scalar still
-    # renders image tiles across every core, so it is not a fallback to
-    # single-threaded.
-    if mi.variant() is None:
-        for variant in ("llvm_ad_rgb", "scalar_rgb"):
-            try:
-                mi.set_variant(variant)
-                break
-            except Exception:
-                continue
+    if mi.variant() is not None:
+        return mi.variant()
+    for variant in ("llvm_ad_rgb", "scalar_rgb"):
+        try:
+            mi.set_variant(variant)
+            return variant
+        except Exception:
+            continue
+    raise RuntimeError("no usable mitsuba variant")
+
+
+def make_scene(meshes, cam, aspect, window_width):
+    """Build the mitsuba scene once. Returns (scene, (width, height)).
+
+    Split from rendering so a progressive render can fire many passes at the
+    same scene instead of re-parsing geometry and rebuilding the BVH for
+    every one of them.
+
+    meshes: sequence of (name, verts, tris, color, roughness, transparency).
+    cam:    (eye, look_dir, up, fov_vertical_deg), arrays apart from fov.
+    """
+    import mitsuba as mi
+    select_variant()
 
     width = int(min(MAX_WIDTH, max(320, window_width)))
     height = max(240, int(round(width / aspect)))
@@ -160,16 +207,63 @@ def render_view(meshes, cam, aspect, window_width, spp=DEFAULT_SPP):
     lo = np.min([v.min(axis=0) for _, v, _, _, _, _ in meshes], axis=0)
     hi = np.max([v.max(axis=0) for _, v, _, _, _, _ in meshes], axis=0)
 
+    # The PLY files only need to outlive load_dict; the scene holds its own
+    # copy of the geometry once it is parsed.
     with tempfile.TemporaryDirectory(prefix="baseplate_render_") as tmp:
         parts = []
         for name, verts, tris, color, roughness, transparency in meshes:
             ply_path = os.path.join(tmp, name + ".ply")
             _write_ply(ply_path, verts, tris)
             parts.append((name, ply_path, color, roughness, transparency))
+        scene = mi.load_dict(_scene_dict(mi, parts, cam, width, height, lo, hi))
 
-        scene = mi.load_dict(_scene_dict(mi, parts, cam, width, height, spp, lo, hi))
-        image = mi.render(scene, spp=int(spp))
+    return scene, (width, height)
 
-    bitmap = mi.Bitmap(image).convert(mi.Bitmap.PixelFormat.RGB,
-                                      mi.Struct.Type.Float32, srgb_gamma=True)
+
+def render_pass(scene, spp, seed=0):
+    """One batch of samples, as a linear (H, W, 3) float array. Linear so
+    that passes can be averaged: averaging sRGB-encoded images is wrong."""
+    import mitsuba as mi
+    return np.array(mi.render(scene, spp=int(spp), seed=int(seed)), dtype=np.float32)
+
+
+def denoise(linear):
+    """Open Image Denoise on the linear image. Returns the input untouched
+    if the denoiser is unavailable, since it is an optional accelerator and
+    not worth failing a render over."""
+    try:
+        import pyoidn
+    except ImportError:
+        return linear
+
+    image = np.ascontiguousarray(linear, dtype=np.float32)
+    out = np.zeros_like(image)
+    height, width = image.shape[:2]
+    with pyoidn.Device(pyoidn.OIDN_DEVICE_TYPE_CPU) as device:
+        device.commit()
+        with pyoidn.Filter(device, pyoidn.OIDN_FILTER_TYPE_RT) as flt:
+            flt.set_image("color", image, pyoidn.OIDN_FORMAT_FLOAT3, width, height)
+            flt.set_image("output", out, pyoidn.OIDN_FORMAT_FLOAT3, width, height)
+            flt.set_bool("hdr", True)
+            flt.commit()
+            flt.execute()
+        if device.get_error() is not None:
+            return linear
+    return out
+
+
+def to_srgb(linear):
+    """Linear -> sRGB-encoded floats in [0, 1], ready for polyscope."""
+    import mitsuba as mi
+    bitmap = mi.Bitmap(np.ascontiguousarray(linear, dtype=np.float32))
+    bitmap = bitmap.convert(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.Float32, srgb_gamma=True)
     return np.clip(np.array(bitmap), 0.0, 1.0)
+
+
+def render_view(meshes, cam, aspect, window_width, spp=DEFAULT_SPP, denoised=True):
+    """One-shot convenience wrapper: scene, one pass, denoise, encode."""
+    scene, _ = make_scene(meshes, cam, aspect, window_width)
+    linear = render_pass(scene, spp)
+    if denoised:
+        linear = denoise(linear)
+    return to_srgb(linear)
