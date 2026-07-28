@@ -49,7 +49,7 @@ params["snap_lines"] = True
 params["web"] = WEB
 params["edge_web"] = EDGE_WEB
 
-view = dict(show_plates=True, show_pillars=True)
+view = dict(show_plate_bottom=True, show_plate_top=True, show_pillars=True)
 
 FIXTURES = ("clip", "snap", "screw", "press")
 
@@ -62,11 +62,34 @@ scene_hi = np.ones(3)
 # cached board build, keyed on the params that actually affect it
 board_cache = {"key": None, "board": None, "geo": None}
 
+# Polyscope's materials are matcaps that add a lot of ambient light, so a
+# color set to the literal sRGB of FR4 comes out washed to mint. These are
+# pre-compensated: they render as solder-mask green and light blue, they do
+# not read as those colors on a swatch.
+FR4_GREEN = (0.00, 0.24, 0.08)     # solder mask green, both plates
+PILLAR_BLUE = (0.30, 0.62, 0.92)   # light blue, printed parts
+
 MESH_COLORS = {
-    "pillar": (0.80, 0.55, 0.20),
-    "plate_bottom": (0.35, 0.55, 0.75),
-    "plate_top": (0.35, 0.75, 0.55),
+    "pillar": PILLAR_BLUE,
+    "plate_bottom": FR4_GREEN,
+    "plate_top": FR4_GREEN,
 }
+
+# "clay" is the most even of the built-in materials: matte, no blown-out
+# specular on the large flat plate faces. Supersampling is what actually
+# cleans up the hole and slot edges, which is most of what you look at here.
+MATERIAL = "clay"
+SSAA_INTERACTIVE = 2
+SSAA_SCREENSHOT = 4
+
+
+def setup_render(ssaa=SSAA_INTERACTIVE):
+    ps.set_up_dir("z_up")
+    ps.set_ground_plane_mode("shadow_only")
+    ps.set_shadow_darkness(0.32)
+    ps.set_shadow_blur_iters(4)
+    ps.set_background_color((1.0, 1.0, 1.0))
+    ps.set_SSAA_factor(ssaa)
 
 
 def rot90(pt, k):
@@ -125,13 +148,15 @@ def rebuild():
     meshes = {}
     if view["show_pillars"]:
         meshes["pillar"] = mesh_arrays(build_pillars(p, geo))
-    if view["show_plates"]:
+    if view["show_plate_bottom"]:
         meshes["plate_bottom"] = mesh_arrays(board.translate((0, 0, -p["plate_t"])))
+    if view["show_plate_top"]:
         meshes["plate_top"] = mesh_arrays(board.translate((0, 0, p["height"])))
 
     new_names = []
     for name, (verts, tris) in meshes.items():
-        ps.register_surface_mesh(name, verts, tris, smooth_shade=False, color=MESH_COLORS.get(name))
+        ps.register_surface_mesh(name, verts, tris, smooth_shade=False,
+                                 color=MESH_COLORS.get(name), material=MATERIAL)
         new_names.append(name)
 
     for name in mesh_names:
@@ -264,10 +289,14 @@ def ui():
             pillars_dirty = True
 
     psim.Separator()
-    changed, view["show_pillars"] = psim.Checkbox("Show pillars", view["show_pillars"])
+    psim.TextUnformatted("Show")
+    changed, view["show_pillars"] = psim.Checkbox("Pillars", view["show_pillars"])
     pillars_dirty = pillars_dirty or changed
     psim.SameLine()
-    changed, view["show_plates"] = psim.Checkbox("Show plates", view["show_plates"])
+    changed, view["show_plate_bottom"] = psim.Checkbox("Bottom plate", view["show_plate_bottom"])
+    board_dirty = board_dirty or changed
+    psim.SameLine()
+    changed, view["show_plate_top"] = psim.Checkbox("Top plate", view["show_plate_top"])
     board_dirty = board_dirty or changed
 
     if psim.TreeNodeEx("Pillar parameters", psim.ImGuiTreeNodeFlags_DefaultOpen):
@@ -358,17 +387,17 @@ def screen_size():
 
 
 def main():
+    shot = "--screenshot" in sys.argv
     ps.set_program_name("Pillar + baseplate generator")
     width, height = screen_size()
     ps.set_window_size(width, height)
     ps.init()
-    ps.set_up_dir("z_up")
-    ps.set_ground_plane_mode("shadow_only")
+    setup_render(SSAA_SCREENSHOT if shot else SSAA_INTERACTIVE)
     rebuild()
     frame_scene()
     ps.set_user_callback(ui)
 
-    if "--screenshot" in sys.argv:
+    if shot:
         out = sys.argv[sys.argv.index("--screenshot") + 1]
         ps.screenshot(out)
         print("Wrote " + out)

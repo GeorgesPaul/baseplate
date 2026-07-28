@@ -46,6 +46,13 @@ The full panel, which is also the largest board most cheap fab houses take at th
 
 ![250x250 clip assembly](images/assembly_250x250_clip_h50.png)
 
+### Top plate off
+
+Pillars and each plate have their own show/hide checkbox, so you can drop the top plate and look at
+what the corner stubs are actually doing. Here the clip fixture's cross-drilled holes are visible.
+
+![70x70 assembly with the top plate hidden](images/assembly_70x70_open.png)
+
 ### Snap lines off
 
 The break-off slots are a checkbox. Turn them off for a plain drilled grid plate: nothing to snap
@@ -127,6 +134,10 @@ uv run viewer.py
 
 That opens the live parameter viewer: drag sliders, watch the assembly rebuild. The board mesh is
 cached on the parameters that affect it, so pillar-only tweaks stay interactive even at 250 x 250 mm.
+
+The **Show** row has an independent checkbox for the pillars, the bottom plate and the top plate.
+Anything unchecked is not built at all, not just hidden, so hiding the plates also makes rebuilds
+faster while you tune pillar geometry.
 
 Two buttons in the viewer export:
 
