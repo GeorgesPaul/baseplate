@@ -86,6 +86,33 @@ MATERIAL = "clay"
 SSAA_INTERACTIVE = 2
 SSAA_SCREENSHOT = 4
 
+# Supersampling is per-pixel work: factor 2 means four times the fragments.
+# That is a good trade on a small window and a bad one on a hidpi panel,
+# where the pixels are already too small to see the difference. Measured at
+# 3840x2400, factor 2 nearly doubled frame time for no visible gain, so above
+# this many real pixels we stop supersampling.
+SSAA_PIXEL_BUDGET = 2_500_000
+
+_transparency_mode = {"current": None}
+
+
+def ssaa_for(width, height, screenshot=False):
+    if width * height > SSAA_PIXEL_BUDGET:
+        return 2 if screenshot else 1
+    return SSAA_SCREENSHOT if screenshot else SSAA_INTERACTIVE
+
+
+def apply_transparency_mode():
+    """Polyscope's "pretty" transparency re-renders the scene in depth peels,
+    which at 3840x2400 cost more than everything else in the frame put
+    together. It is only needed when something is actually translucent, so
+    keep the cheap mode until the top plate's opacity slider is moved."""
+    translucent = view["show_plate_top"] and view["top_transparency"] < 0.999
+    mode = "pretty" if translucent else "none"
+    if mode != _transparency_mode["current"]:
+        ps.set_transparency_mode(mode)
+        _transparency_mode["current"] = mode
+
 
 def setup_render(ssaa=SSAA_INTERACTIVE):
     ps.set_up_dir("z_up")
@@ -94,9 +121,7 @@ def setup_render(ssaa=SSAA_INTERACTIVE):
     ps.set_shadow_blur_iters(4)
     ps.set_background_color((1.0, 1.0, 1.0))
     ps.set_SSAA_factor(ssaa)
-    # Needed for the top plate's transparency slider to composite correctly
-    # instead of falling back to a screen-door approximation.
-    ps.set_transparency_mode("pretty")
+    apply_transparency_mode()
 
 
 def mesh_transparency(name):
@@ -360,6 +385,7 @@ def rebuild():
     global last_build_ms, mesh_names, scene_lo, scene_hi
     t0 = time.perf_counter()
     clear_render_overlay()
+    apply_transparency_mode()
     meshes = scene_meshes()
 
     new_names = []
@@ -519,6 +545,7 @@ def ui():
             # Opacity is a display property, not geometry, so poke the
             # registered mesh directly rather than paying for a rebuild.
             clear_render_overlay()
+            apply_transparency_mode()
             if ps.has_surface_mesh("plate_top"):
                 ps.get_surface_mesh("plate_top").set_transparency(view["top_transparency"])
 
@@ -633,7 +660,7 @@ def main():
     width, height = screen_size()
     ps.set_window_size(width, height)
     ps.init()
-    setup_render(SSAA_SCREENSHOT if shot else SSAA_INTERACTIVE)
+    setup_render(ssaa_for(width, height, screenshot=shot))
     rebuild()
     frame_scene()
     ps.set_user_callback(ui)

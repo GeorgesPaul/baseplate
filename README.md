@@ -156,6 +156,11 @@ The **Show** row has an independent checkbox for the pillars, the bottom plate a
 Anything unchecked is not built at all, not just hidden, so hiding the plates also makes rebuilds
 faster while you tune pillar geometry. The top plate additionally has an opacity slider.
 
+Two viewport settings adapt rather than being fixed, because both are expensive enough to matter on
+a large display. Depth-peeled transparency is only switched on while the top plate is actually
+translucent, and supersampling is dropped above ~2.5 Mpx, where the extra samples are invisible and
+cost roughly double. Together those are worth about 4.5x the frame rate at 3840x2400.
+
 mitsuba and the denoiser are only imported when you press **Render**, so they cost nothing on a
 session that never uses them.
 
