@@ -4,6 +4,8 @@
 |---|---|
 | ![A finished stack with electronics mounted](images/demo.png) | ![A single plate carrying an Arduino, a breadboard and sensor modules](images/demo2.png) |
 
+![The live parameter viewer: a 150x100 stack with the top plate at 32% opacity, next to the panel of sliders that drives it](images/demo3.png)
+
 A parametric prototyping stack: a snappable M3 grid plate fabricated as a PCB, plus 3D-printed
 L-shaped corner pillars that hold two plates apart.
 
