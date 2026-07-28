@@ -139,6 +139,16 @@ Dependencies are managed with [uv](https://docs.astral.sh/uv/).
 uv run viewer.py
 ```
 
+Optional, and only if you plan to use the **Render** button: installing LLVM lets mitsuba use its
+vectorised CPU backend instead of the scalar one.
+
+```
+winget install LLVM.LLVM
+```
+
+Nothing to configure after that, and nothing breaks without it. See
+[On GPUs and LLVM](#on-gpus-and-llvm) for why it is not bundled.
+
 That opens the live parameter viewer: drag sliders, watch the assembly rebuild. The board mesh is
 cached on the parameters that affect it, so pillar-only tweaks stay interactive even at 250 x 250 mm.
 
@@ -190,10 +200,20 @@ Short version: on this machine, no. Longer version, since it is not obvious:
   that numba uses: llvmlite links LLVM statically into its own DLL and does not expose the C API
   Dr.Jit needs, so having numba working is no help here.
 
-  Installing LLVM (`winget install LLVM.LLVM`, or the official Windows installer) puts `LLVM-C.dll`
-  in `C:\Program Files\LLVM\bin`. `render.py` looks there on import and sets `DRJIT_LIBLLVM_PATH`
-  itself, so the faster variant is picked up with no further configuration. Scalar still renders
-  image tiles across every core, so this is a speedup rather than a fix for something broken.
+To get the faster variant, install LLVM:
+
+```
+winget install LLVM.LLVM
+```
+
+(or the [official Windows installer](https://github.com/llvm/llvm-project/releases), which is the
+same thing with a GUI). Either puts `LLVM-C.dll` in `C:\Program Files\LLVM\bin`. `render.py` looks
+there on import and sets `DRJIT_LIBLLVM_PATH` itself, so there is nothing to configure afterwards:
+restart the viewer and the `jitc_llvm_init()` warning is gone. On Linux, install your distribution's
+LLVM runtime package; `render.py` checks `/usr/lib/libLLVM.so` the same way.
+
+This is optional. Scalar already renders image tiles across every core, so it is a speedup, not a
+fix for something broken.
 
 Two buttons in the viewer export:
 
