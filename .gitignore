@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editor / tool state
+.history/
+imgui.ini
+.polyscope.ini
+
+# KiCad local state
+*.kicad_prl
+*-backups/
+fp-info-cache
+
+# Generated output: regenerate with generate_baseplate.py / viewer.py / pillar.py.
+# Gerbers + drills
+PCB/production_*/
+*_gerbers.zip
+*.gbl
+*.gtl
+*.gbs
+*.gts
+*.gto
+*.gm1
+*.gbrjob
+*.drl
+*-drl_map.pdf
+# Meshes
+*.stl
+# Renders. images/ is exempt: those are the ones README.md points at.
+PCB/*.png
+!images/
