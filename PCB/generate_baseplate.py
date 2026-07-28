@@ -2,6 +2,7 @@
 
 Usage:
     python generate_baseplate.py [WIDTH [HEIGHT]] [--hole-d MM]
+                                 [--no-snap-lines] [--web MM] [--edge-web MM]
 
 WIDTH and HEIGHT are the board dimensions in mm (default 250 x 250; square
 if only WIDTH is given). Dimensions are rounded to the nearest multiple of
@@ -13,9 +14,10 @@ Board contents:
 - M3 clearance holes (3.2 mm NPTH by default) on a 10 mm grid, centered in
   each cell.
 - Snap lines every 10 mm in both axes: one milled NPTH slot per 10 mm
-  segment, with solid webs at the line crossings perforated by a small
-  plus-pattern of mouse bites. Far fewer drill hits than perforating the
-  whole line, while still breaking cleanly along any grid line.
+  segment, with a solid web straddling each line crossing. --web and
+  --edge-web set how much material those webs leave, i.e. how hard the
+  panel is to snap; --no-snap-lines omits the break-off geometry entirely
+  and leaves a plain drilled grid plate.
 
 The hole/slot layout itself lives in baseplate_geometry.py, shared with the
 live viewer's manifold3d preview so the two never drift apart.
@@ -31,15 +33,22 @@ import argparse
 import os
 import uuid
 
-from baseplate_geometry import compute_geometry, M3_DRILL
+from baseplate_geometry import compute_geometry, solid_fraction, M3_DRILL, WEB, EDGE_WEB
 
 parser = argparse.ArgumentParser(description="Generate a snappable M3 mounting plate as a KiCad board.")
 parser.add_argument("width", type=float, nargs="?", default=250.0, help="board width in mm (default 250)")
 parser.add_argument("height", type=float, nargs="?", default=None, help="board height in mm (default: same as width)")
 parser.add_argument("--hole-d", type=float, default=M3_DRILL, help=f"grid hole diameter in mm (default {M3_DRILL:g})")
+parser.add_argument("--no-snap-lines", dest="snap_lines", action="store_false",
+                    help="omit the break-off slots entirely (plain drilled grid plate)")
+parser.add_argument("--web", type=float, default=WEB,
+                    help=f"solid web at each line crossing in mm; higher is harder to snap (default {WEB:g})")
+parser.add_argument("--edge-web", type=float, default=EDGE_WEB,
+                    help=f"solid material between slot end and board edge in mm (default {EDGE_WEB:g})")
 args = parser.parse_args()
 
-geo = compute_geometry(args.width, args.height, args.hole_d, label=True)
+geo = compute_geometry(args.width, args.height, args.hole_d, args.snap_lines,
+                       args.web, args.edge_web, label=True)
 W, H = geo.width, geo.height
 
 
@@ -78,7 +87,9 @@ m3_count = len(pads)
 pads += [slot(s.cx, s.cy, s.length, s.width, s.along_y) for s in geo.snap_slots]
 slot_count = len(pads) - m3_count
 
-pads += [pad(h.x, h.y, h.d) for h in geo.mouse_bites]
+descr = (f"{dim(W)}x{dim(H)} mm universal M3 mounting plate, "
+         + (f"snappable on a 10 mm grid ({args.web:g} mm webs)" if args.snap_lines
+            else "plain grid, no break-off slots"))
 
 font = '(effects (font (size 1 1) (thickness 0.15)))'
 pcb = f'''(kicad_pcb
@@ -121,7 +132,7 @@ pcb = f'''(kicad_pcb
     (layer "F.Cu")
     (uuid "{uid()}")
     (at 0 0)
-    (descr "{dim(W)}x{dim(H)} mm universal M3 mounting plate, snappable on a 10 mm grid")
+    (descr "{descr}")
     (attr through_hole board_only exclude_from_pos_files exclude_from_bom allow_missing_courtyard)
     (property "Reference" "H1" (at {num(W / 2)} -2 0) (layer "F.SilkS") (hide yes) (uuid "{uid()}") {font})
     (property "Value" "Baseplate_{dim(W)}x{dim(H)}" (at {num(W / 2)} {num(H + 2)} 0) (layer "F.Fab") (uuid "{uid()}") {font})
@@ -143,8 +154,13 @@ with open(out, "w", newline="\n") as f:
 
 print(f"board: {dim(W)} x {dim(H)} mm -> {os.path.basename(out)}")
 print(f"M3 holes: {m3_count}")
-print(f"snap slots: {slot_count}")
-print(f"mouse bites: {len(pads) - m3_count - slot_count}")
+if args.snap_lines:
+    print(f"snap slots: {slot_count} (web {args.web:g} mm, edge web {args.edge_web:g} mm)")
+    for axis, n_cells, total in (("X", geo.nx, W), ("Y", geo.ny, H)):
+        frac = solid_fraction(n_cells, total, args.web, args.edge_web)
+        print(f"  break line along {axis}: {frac * 100:.0f}% solid ({frac * total:.1f} mm of {total:g} mm)")
+else:
+    print("snap slots: none (--no-snap-lines)")
 print(f"total pads: {len(pads)}")
 
 # Resave through pcbnew so the file ends up in the native format of the

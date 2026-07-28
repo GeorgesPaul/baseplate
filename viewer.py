@@ -5,9 +5,9 @@ built from PCB/baseplate_geometry.py, the exact same hole/slot pattern used
 by PCB/generate_baseplate.py for the production KiCad board -- not a
 simplified stand-in -- so what you see here is what gets fabricated.
 Rebuilding it is the expensive part (a few hundred ms to ~1-2s at large
-board sizes because of the M3 grid + snap-slot + mouse-bite hole count), so
-it's only rebuilt when a board-affecting parameter (PCB length/width, hole
-size) actually changes; pillar-only tweaks just rebuild the pillars.
+board sizes because of the M3 grid + snap-slot count), so it's only rebuilt
+when a board-affecting parameter (PCB length/width, hole size, snap-line
+settings) actually changes; pillar-only tweaks just rebuild the pillars.
 
 Run with:   uv run viewer.py
 Smoke test (renders one frame to a PNG and exits):
@@ -30,10 +30,13 @@ sys.path.insert(0, os.path.join(ROOT, "pillars"))
 sys.path.insert(0, os.path.join(ROOT, "PCB"))
 import pillar as pl
 import baseplate_mesh as bpm
-from baseplate_geometry import CELL
+from baseplate_geometry import CELL, WEB, EDGE_WEB, solid_fraction
 
 EDGE_MARGIN = CELL / 2.0  # mm, corner M3 hole center to board edge (fixed by the grid)
 HEIGHT_DEFAULT = pl.DEFAULTS["heights"][1]
+
+# Board-only params, kept out of the dict handed to build_pillar().
+BOARD_PARAM_KEYS = ("pcb_length", "pcb_width", "snap_lines", "web", "edge_web")
 
 params = {k: pl.DEFAULTS[k] for k in pl.PILLAR_PARAM_KEYS if k in pl.DEFAULTS}
 params["height"] = HEIGHT_DEFAULT
@@ -42,6 +45,9 @@ for k in pl.FIXTURE_PARAM_KEYS:
 params["fixture"] = pl.DEFAULTS["fixture"]
 params["pcb_length"] = 70.0
 params["pcb_width"] = 70.0
+params["snap_lines"] = True
+params["web"] = WEB
+params["edge_web"] = EDGE_WEB
 
 view = dict(show_plates=True, show_pillars=True)
 
@@ -71,15 +77,17 @@ def rot90(pt, k):
 
 
 def pillar_params():
-    p = {k: v for k, v in params.items() if k not in ("pcb_length", "pcb_width")}
+    p = {k: v for k, v in params.items() if k not in BOARD_PARAM_KEYS}
     return p
 
 
 def get_board():
-    key = (params["pcb_length"], params["pcb_width"], params["hole_d"], params["plate_t"])
+    key = (params["pcb_length"], params["pcb_width"], params["hole_d"], params["plate_t"],
+           params["snap_lines"], params["web"], params["edge_web"])
     if board_cache["key"] != key:
         board, geo = bpm.build_board_at_origin(
-            params["pcb_length"], params["pcb_width"], params["hole_d"], params["plate_t"])
+            params["pcb_length"], params["pcb_width"], params["hole_d"], params["plate_t"],
+            params["snap_lines"], params["web"], params["edge_web"])
         board_cache.update(key=key, board=board, geo=geo)
     return board_cache["board"], board_cache["geo"]
 
@@ -187,6 +195,10 @@ def export_pcb():
     pcb_dir = os.path.join(ROOT, "PCB")
     args = [kicad_python, "generate_baseplate.py", str(params["pcb_length"]), str(params["pcb_width"]),
             "--hole-d", str(params["hole_d"])]
+    if params["snap_lines"]:
+        args += ["--web", str(params["web"]), "--edge-web", str(params["edge_web"])]
+    else:
+        args.append("--no-snap-lines")
     status_line = "Running KiCad export (this can take a few seconds)..."
     print(status_line)
     result = subprocess.run(args, cwd=pcb_dir, capture_output=True, text=True)
@@ -225,6 +237,22 @@ def ui():
         pillars_dirty = True
     if slider_row("Pillar height (mm)", "height", 10.0, 80.0):
         pillars_dirty = True
+
+    psim.Separator()
+    changed, params["snap_lines"] = psim.Checkbox("Break-off snap lines", params["snap_lines"])
+    board_dirty = board_dirty or changed
+    if params["snap_lines"]:
+        if slider_row("Crossing web (mm)", "web", 1.0, 8.0):
+            board_dirty = True
+        if slider_row("Edge web (mm)", "edge_web", 0.5, 8.0):
+            board_dirty = True
+        # The webs are the only thing holding the panel together along a
+        # break line, so show how much of that line survives. Higher is
+        # harder to snap.
+        for axis, n_cells, total in (("X", geo.nx, geo.width), ("Y", geo.ny, geo.height)):
+            frac = solid_fraction(n_cells, total, params["web"], params["edge_web"])
+            psim.TextUnformatted("break along %s: %.0f%% solid (%.1f of %g mm)"
+                                 % (axis, frac * 100, frac * total, total))
 
     psim.Separator()
     psim.TextUnformatted("Fixture type")

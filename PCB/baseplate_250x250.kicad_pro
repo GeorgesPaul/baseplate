@@ -264,7 +264,7 @@
     "pinned_symbol_libs": []
   },
   "meta": {
-    "filename": "baseplate.kicad_pro",
+    "filename": "baseplate_250x250.kicad_pro",
     "version": 3
   },
   "net_settings": {
@@ -302,6 +302,7 @@
       "netlist": "",
       "plot": "",
       "specctra_dsn": "",
+      "step": "",
       "vrml": ""
     },
     "page_layout_descr_file": ""

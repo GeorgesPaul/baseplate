@@ -42,9 +42,16 @@ single bolt that clamps both plates.
 ### 250 x 250 mm, clip fixture, 50 mm pillars
 
 The full panel, which is also the largest board most cheap fab houses take at the low price tier.
-625 M3 holes, 1200 snap slots, 2880 mouse bites.
+625 M3 holes, 1200 snap slots.
 
 ![250x250 clip assembly](images/assembly_250x250_clip_h50.png)
+
+### Snap lines off
+
+The break-off slots are a checkbox. Turn them off for a plain drilled grid plate: nothing to snap
+along, nothing to crack in shipping, and the full stiffness of an uncut sheet.
+
+![70x70 assembly with no snap lines](images/assembly_70x70_noslots.png)
 
 ## Fixture types
 
@@ -71,10 +78,44 @@ Rendered from the generated KiCad file, 250 x 250 mm:
 | ![board top render](images/board_250x250_top.png) | ![board perspective render](images/board_250x250_perspective.png) |
 
 Each 10 mm cell carries one M3 clearance hole in its center. Every interior grid line is a run of
-1.0 mm milled NPTH slots, one per cell, each stopping short of the line crossings so a 2.5 mm solid
-web straddles every crossing and keeps the panel rigid in shipping. Those webs are perforated with a
-plus-pattern of 0.5 mm mouse bites, so the panel still snaps cleanly along any grid line but needs
-far fewer drill hits than perforating the whole line would.
+1.0 mm milled NPTH slots, one per cell, each stopping short of the line crossings so a solid web
+straddles every crossing. Those webs are the only thing holding the panel together along a break
+line, and they are what you tune.
+
+## Break-off strength
+
+The 70 x 70 board close up, where the webs are legible:
+
+![70x70 board top render](images/board_70x70_top.png)
+
+Two numbers set how hard the panel is to snap:
+
+- **`web`** (default 3.0 mm), the solid material left at each interior line crossing.
+- **`edge_web`** (default 2.5 mm), the solid margin between the last slot and the board edge. This
+  one matters more than its size suggests: the board edge is where a crack starts, so a thin edge web
+  is what makes a panel come apart in the box.
+
+Both are exposed as sliders in the viewer and as `--web` / `--edge-web` on the generator. The viewer
+prints the resulting solid fraction of a break line as you drag them, and the generator prints it on
+export:
+
+```
+snap slots: 84 (web 3 mm, edge web 2.5 mm)
+  break line along X: 33% solid (23.0 mm of 70 mm)
+  break line along Y: 33% solid (23.0 mm of 70 mm)
+```
+
+The first fabricated boards broke apart far too easily. That design used 2.5 mm webs and a 0.8 mm
+edge web, and then perforated every web with a plus-pattern of 0.5 mm mouse bites. Three of those
+bites landed directly on the break line, leaving about 1.0 mm of a 2.5 mm web as four 0.25 mm
+ligaments, with the drilled holes acting as crack starters on top of that. A 70 mm break line held
+roughly 7.6 mm of FR4.
+
+The current design drops mouse bites entirely and widens both webs, so the same line holds 23 mm of
+solid FR4 in continuous 3 mm ligaments with no stress risers. That is about three times the material
+and a much larger jump in actual break force, since the notches are gone too. If it now errs the
+other way for your handling, walk `web` back toward 2.0 mm; the sliders are there so you do not have
+to guess twice.
 
 ## Running it
 
@@ -117,9 +158,18 @@ cd PCB
 (The viewer's **Export PCB** button finds that interpreter itself, searching `%LOCALAPPDATA%\Programs\KiCad`
 and `C:\Program Files\KiCad`.)
 
-Arguments are `WIDTH [HEIGHT] [--hole-d MM]`, in mm, rounded to the 10 mm grid; square if only width
-is given. It writes `baseplate_<W>x<H>.kicad_pcb`, Gerbers and Excellon drills into
-`production_<W>x<H>/`, and a ready-to-upload `baseplate_<W>x<H>_gerbers.zip`.
+Arguments:
+
+| | |
+|---|---|
+| `WIDTH [HEIGHT]` | board size in mm, rounded to the 10 mm grid; square if only width is given |
+| `--hole-d MM` | grid hole diameter (default 3.2) |
+| `--no-snap-lines` | omit the break-off slots entirely |
+| `--web MM` | solid web at each line crossing (default 3.0) |
+| `--edge-web MM` | solid margin between the last slot and the board edge (default 2.5) |
+
+It writes `baseplate_<W>x<H>.kicad_pcb`, Gerbers and Excellon drills into `production_<W>x<H>/`, and
+a ready-to-upload `baseplate_<W>x<H>_gerbers.zip`.
 
 The board is first written in a conservative s-expression format, then reloaded and resaved through
 `pcbnew` so the file ends up in the native format of the installed KiCad version.
@@ -148,7 +198,7 @@ to regenerate any of them.
 | M3 clearance hole | 3.2 mm NPTH |
 | Plate thickness | 1.6 mm |
 | Snap slot width | 1.0 mm |
-| Web at line crossings | 2.5 mm |
-| Mouse bite drill / pitch | 0.5 mm / 0.75 mm |
+| Web at line crossings | 3.0 mm (tunable) |
+| Edge web | 2.5 mm (tunable) |
 | Stock pillar heights | 20 / 35 / 50 mm |
 | Pillar arm width / length | 4 mm / 15 mm |

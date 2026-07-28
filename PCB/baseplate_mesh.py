@@ -6,7 +6,7 @@ dependency, so this runs in the regular uv-managed venv.
 
 from manifold3d import Manifold, CrossSection, OpType
 
-from baseplate_geometry import compute_geometry
+from baseplate_geometry import compute_geometry, WEB, EDGE_WEB
 
 CIRC_SEGMENTS = 32
 
@@ -23,16 +23,17 @@ def _slot_cross_section(slot):
     return CrossSection.batch_boolean([c1, c2], OpType.Add).hull()
 
 
-def build_board_at_origin(width, height=None, hole_d=3.2, thickness=1.6, label=False):
+def build_board_at_origin(width, height=None, hole_d=3.2, thickness=1.6,
+                          snap_lines=True, web=WEB, edge_web=EDGE_WEB, label=False):
     """Returns (Manifold, BoardGeometry). The manifold spans z in
     [0, thickness] and x/y in [0, geo.width] / [0, geo.height]. Split out
     from build_board() so a caller needing both plates (identical apart from
     Z placement) can extrude once and cheaply translate twice instead of
     paying the triangulation cost, by far the most expensive step, twice."""
-    geo = compute_geometry(width, height, hole_d, label=label)
+    geo = compute_geometry(width, height, hole_d, snap_lines, web, edge_web, label=label)
 
     cutters = [CrossSection.circle(h.d / 2.0, CIRC_SEGMENTS).translate((h.x, h.y))
-               for h in geo.m3_holes + geo.mouse_bites]
+               for h in geo.m3_holes]
     cutters += [_slot_cross_section(s) for s in geo.snap_slots]
     cutout = CrossSection.batch_boolean(cutters, OpType.Add)
 
@@ -41,9 +42,11 @@ def build_board_at_origin(width, height=None, hole_d=3.2, thickness=1.6, label=F
     return board, geo
 
 
-def build_board(width, height=None, hole_d=3.2, thickness=1.6, z0=0.0, label=False):
+def build_board(width, height=None, hole_d=3.2, thickness=1.6, z0=0.0,
+                snap_lines=True, web=WEB, edge_web=EDGE_WEB, label=False):
     """Returns (Manifold, BoardGeometry) with the manifold placed at z0."""
-    board, geo = build_board_at_origin(width, height, hole_d, thickness, label)
+    board, geo = build_board_at_origin(width, height, hole_d, thickness,
+                                       snap_lines, web, edge_web, label)
     return board.translate((0, 0, z0)), geo
 
 
@@ -59,5 +62,5 @@ if __name__ == "__main__":
     board, geo = build_board(250.0, 250.0)
     dt = (time.perf_counter() - t0) * 1000
     print(f"{geo.width:g}x{geo.height:g} board: {len(geo.m3_holes)} holes, "
-          f"{len(geo.snap_slots)} slots, {len(geo.mouse_bites)} mouse bites, "
+          f"{len(geo.snap_slots)} slots, "
           f"status {board.status()}, built in {dt:.0f} ms")
